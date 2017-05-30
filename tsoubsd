@@ -1,0 +1,924 @@
+#!/bin/sh
+# tsoubsd
+# author: Thanos Tsouanas <thanos@tsouanas.org>
+
+# tsoubsd superscript
+VERSION=1.7
+
+# error codes 
+ERRPERMISSION=4
+ERRSPECIFIC=2
+
+# versioning
+KERNELVERSION=`sysctl -n kern.version | head -1 | cut -d " " -f 2`
+OSRELEASE=`uname -r`
+
+DOAS_CMD=doas
+
+########################################################################
+# sidekicks
+
+TSOUECHO_BOLD=`tput bold`
+TSOUECHO_NORMAL=`tput sgr0`
+
+tsouecho()
+{
+    echo "$TSOUECHO_BOLD$1$TSOUECHO_NORMAL"
+}
+
+tsouechon()
+{
+    echo -n "$TSOUECHO_BOLD$1$TSOUECHO_NORMAL"
+}
+
+tsouerror()
+{
+    echo >&2 "$1"
+}
+
+tsouabortprompt()
+{
+    tsouechon "Abort? [y/n] "
+    while (true); do
+        read answer
+        case $answer in
+            Y|y)
+                tsouecho "Aborting."
+                exit $ERRSPECIFIC;
+                ;;
+            N|n)
+                tsouecho "OK.  Proceeding..."
+                break
+                ;;
+        esac
+        echo -n "Enter either 'y' or 'n': "
+    done
+}
+
+do_confirm()
+{
+	echo $1
+	tsouecho "Press enter to proceed, Ctrl-C to cancel."
+	read nothing
+}
+
+psiu()
+{
+    do_confirm "psiu!  I need your attention now!"
+}
+
+tudo_bem()
+{
+    if [ $? -ne 0 ]; then
+        tsouecho "Failed while: $1."
+        tsouabortprompt
+    fi
+}
+
+
+
+########################################################################
+# setting up
+
+setup_branch()
+{
+    ## current or stable?
+    case $OPENBSD_BRANCH in
+        STABLE)
+            export OPENBSD_MIRROR_DIR="${OPENBSD_MIRROR}`uname -r`/"
+            export OPENBSD_ORIGINAL_DIR="http://ftp.openbsd.org/pub/OpenBSD/`uname -r`/"
+            export OPENBSD_CVS_BRANCH="OPENBSD_`uname -r | tr . _`"
+            ;;
+        CURRENT)
+            export OPENBSD_MIRROR_DIR="${OPENBSD_MIRROR}snapshots/"
+            export OPENBSD_ORIGINAL_DIR="http://ftp.openbsd.org/pub/OpenBSD/snapshots/"
+            export OPENBSD_CVS_BRANCH="HEAD"
+            ;;
+        *)
+            echo "OPENBSD_BRANCH must be set to either STABLE or CURRENT in tsoubsd.conf."
+            exit 1
+            ;;
+    esac
+    
+    export OPENBSD_MIRROR_ARCH="${OPENBSD_MIRROR_DIR}`uname -m`/"
+    export OPENBSD_ORIGINAL_ARCH="${OPENBSD_ORIGINAL_DIR}`uname -m`/"
+    export PKG_PATH="${OPENBSD_MIRROR_DIR}packages/`uname -m`/"
+
+}
+
+read_mkconf()
+{
+    if [ -r /etc/mk.conf ]; then
+        . /etc/mk.conf
+    fi
+    
+    # set default source dirs
+    if [ X"$BSDSRCDIR" = X"" ]; then
+        BSDSRCDIR=/usr/src
+    fi
+    if [ X"$XSRCDIR" = X"" ]; then
+        XSRCDIR=/usr/xenocara
+    fi
+    if [ X"$PORTSDIR" = X"" ]; then
+        PORTSDIR=/usr/ports
+    fi
+}
+
+init_tsoubsd()
+{
+    if [ -r /etc/tsoubsd.conf ]; then
+        . /etc/tsoubsd.conf
+    else
+        tsouerror "Cannot read /etc/tsoubsd.conf."
+        tsouerror "You can find a sample file in /usr/local/share/examples/tsoubsd/."
+        exit 1
+    fi
+
+    setup_branch
+    read_mkconf
+}
+
+
+########################################################################
+# checks
+
+only_for_branch()
+{
+    case $OPENBSD_BRANCH in
+        $1)
+            show_machine
+            ;;
+        *)
+            tsouerror "OPENBSD_BRANCH is set to ${OPENBSD_BRANCH},"
+            tsouerror "but this functionality is meant for $1 machines."
+            exit 1
+            ;;
+    esac
+}
+
+require_root()
+{
+    if [ `whoami` != "root" ]; then
+        tsouecho "Only root can run this."
+        exit $ERRPERMISSION
+    fi
+    if [ X"$SUDO_COMMAND" != X"" ]; then
+        if [ X"$SUDO_COMMAND" != X"/usr/bin/su" ]; then
+            tsouecho "Warning: you should avoid sudo-running this command."
+            tsouecho "Instead, it is adviced that you run it as the REAL root user."
+            do_confirm "I can still try to run it like this if you insist..."
+        fi
+    fi
+}
+
+
+########################################################################
+# help
+
+tsoubsd_usage()
+{
+    tsouecho "Usage: tsoubsd COMMAND [options]"
+    tsouecho "Commands:"
+    tsouecho "  tsoubsd build {kernels|userland|xenocara|ux}"
+    tsouecho "  tsoubsd cvs {sync|update|checkout} [options]"
+    tsouecho "  tsoubsd upgrade"
+    tsouecho "  tsoubsd portsupdate"
+    tsouecho "  tsoubsd news"
+    tsouecho "  tsoubsd ssl NAME"
+    tsouecho "  tsoubsd help"
+    tsouecho "  tsoubsd version"
+}
+
+tsoubsd_build_usage()
+{
+    tsouecho "Usage: tsoubsd build {kernels|userland|xenocara|ux}"
+}
+
+tsoubsd_cvs_usage()
+{
+    tsouecho "Usage: tsoubsd cvs COMMAND [options]"
+    tsouecho "Commands:"
+    tsouecho "  tsoubsd cvs sync"
+    tsouecho "  tsoubsd cvs checkout [{src|xenocara|ports|sxp|www|all}]"
+    tsouecho "  tsoubsd cvs update [{src|xenocara|ports|sxp|www|all}]"
+}
+
+tsoubsd_upgrade_usage()
+{
+    tsouecho "Usage: tsoubsd upgrade"
+}
+
+tsoubsd_news_usage()
+{
+    tsouecho "Usage: tsoubsd news"
+}
+
+tsoubsd_portsupdate_usage()
+{
+    tsouecho "Usage: tsoubsd portsupdate"
+}
+
+tsoubsd_ssl_usage()
+{
+    tsouecho "Usage: tsoubsd ssl NAME"
+}
+
+tsoubsd_help_usage()
+{
+    tsouecho "Usage: tsoubsd help"
+}
+
+tsoubsd_version_usage()
+{
+    tsouecho "Usage: tsoubsd version"
+}
+
+
+########################################################################
+# shows
+
+show_version()
+{
+    tsouecho "tsoubsd version $VERSION"
+}
+
+show_machine()
+{
+    tsouecho "| Hostname:           `hostname`"
+    tsouecho "| System branch:      ${OPENBSD_BRANCH}"
+    tsouecho "| System arch:        `uname -m`"
+    tsouecho "| User:               `whoami`"
+    tsouecho "| umask:              `umask`"
+}
+
+show_src()
+{
+    tsouecho "| OPENBSD_SOURCEDIR:  ${OPENBSD_SOURCEDIR}"
+    tsouecho "| BSDSRCDIR:          ${BSDSRCDIR}"
+    tsouecho "| XSRCDIR:            ${XSRCDIR}"
+    tsouecho "| PORTSDIR:           ${PORTSDIR}"
+    tsouecho "| WWWDIR:             ${WWWDIR}"
+}
+
+show_obj()
+{
+    tsouecho "| OPENBSD_OBJECTDIR:  ${OPENBSD_OBJECTDIR}"
+    tsouecho "| BSDOBJDIR:          ${BSDOBJDIR}"
+    tsouecho "| XOBJDIR:            ${XOBJDIR}"
+    tsouecho "| WRKOBJDIR:          ${WRKOBJDIR}"
+}
+
+show_cvs()
+{
+    tsouecho "| OPENBSD_BRANCH:     ${OPENBSD_BRANCH}"
+    tsouecho "| OPENBSD_CVSROOT:    ${OPENBSD_CVSROOT}"
+    tsouecho "| OPENBSD_CVS_BRANCH: ${OPENBSD_CVS_BRANCH}"
+}
+
+show_relconf()
+{
+    tsouecho "| sets dir:           $TSOUBSD_SETSDIR"
+    tsouecho "| ramdisk dir:        $TSOUBSD_RAMDISKDIR"
+    tsouecho "| image mountpoint:   $TSOUBSD_MOUNTPOINT"
+    tsouecho "| vnd index:          $TSOUBSD_VND"
+    tsouecho "| temp checksum:      $TSOUBSD_FSCHECKSUM"
+    tsouecho "| download from:      $OPENBSD_MIRROR_ARCH"
+}
+        
+
+########################################################################
+# tsoubsd build ...
+
+init_objectdir_force()
+{
+    require_root
+    OPENBSD_OBJECTDEV=`df | grep "${OPENBSD_OBJECTDIR}\$" | cut -f 1 -d " " | cut -c 6-`
+    tudo_bem "trying to figure out the device of ${OPENBSD_OBJECTDIR}"
+    if [ X"${OPENBSD_OBJECTDEV}" = X"" ]; then
+        tsouerror "Error: could not figure out the device of ${OPENBSD_OBJECTDIR}."
+        exit 1
+    fi
+    umount ${OPENBSD_OBJECTDIR}
+    tudo_bem "unmounting ${OPENBSD_OBJECTDIR}"
+    newfs ${OPENBSD_OBJECTDEV}
+    tudo_bem "newfs'ing ${OPENBSD_OBJECTDEV}"
+    mount ${OPENBSD_OBJECTDIR}
+    tudo_bem "remounting ${OPENBSD_OBJECTDIR}"
+    mkdir -p $BSDOBJDIR $XOBJDIR $WRKOBJDIR
+    tudo_bem "mkdir'ing objectdirs"
+    chown -R ${TSOUBSD_USER}:wsrc $BSDOBJDIR $XOBJDIR $WRKOBJDIR
+    tudo_bem "chown'ing objectdirs"
+}
+
+init_objectdir()
+{
+    require_root
+    do_confirm "I will reformat ($OPENBSD_OBJECTDIR) and re-mkdir all objdirs."
+    init_objectdir_force
+}
+
+build_bsd_sp()
+{
+    cd $BSDSRC/sys/arch/`uname -m`/conf
+    /usr/sbin/config GENERIC
+    cd $BSDSRC/sys/arch/`uname -m`/compile/GENERIC
+    make clean && make depend && make
+    tudo_bem "building GENERIC (SP)"
+}
+
+build_bsd_mp()
+{
+    cd $BSDSRC/sys/arch/`uname -m`/conf
+    /usr/sbin/config GENERIC.MP
+    cd $BSDSRC/sys/arch/`uname -m`/compile/GENERIC.MP
+    make clean && make depend && make
+    tudo_bem "building GENERIC.MP"
+}
+
+build_kernels()
+{
+    build_bsd_sp
+    build_bsd_mp
+}
+
+autoinstall_kernel()
+{
+    if [ X"$TSOUBSD_AUTOINSTALL_KERNEL" != X"" ]; then
+        cd $BSDSRC/sys/arch/`uname -m`/compile/${TSOUBSD_AUTOINSTALL_KERNEL}
+        psiu
+        do_confirm "sudo'ing to autoinstall the ${TSOUBSD_AUTOINSTALL_KERNEL} kernel."
+        $DOAS_CMD make install && tsouecho "Now, reboot with you new kernel!"
+    fi
+}
+
+build_userland()
+{
+    require_root
+    tsouecho "Checking emptiness of $BSDOBJDIR..."
+    WC=`ls -A $BSDOBJDIR | wc -l`
+    if [ $WC -gt 0 ]; then
+        tsouerror "error: $BSDOBJDIR should be empty now, but it is not."
+        exit 1
+    fi
+    tsouecho "Building userland..."
+    cd $BSDSRCDIR
+    make obj
+    cd $BSDSRCDIR/etc && env DESTDIR=/ make distrib-dirs
+    cd $BSDSRCDIR
+    make build && tsouecho "Done with the userland!"
+}
+
+build_xenocara()
+{
+    require_root
+    tsouecho "Checking emptiness of $XOBJDIR..."
+    WC=`ls -A $XOBJDIR | wc -l`
+    if [ $WC -gt 0 ]; then
+        tsouecho "Error: $XOBJDIR should be empty now, but it is not."
+        exit 1
+    fi
+    tsouecho "Building xenocara..."
+    cd $XSRCDIR
+    make bootstrap
+    make obj
+    make build && tsouecho "Done!  How about a reboot?"
+}
+
+mount_and_install_bsdrd()
+{
+    psiu
+    tsouecho "Configuring vnode and mounting image on $TSOUBSD_MOUNTPOINT..."
+    $DOAS_CMD vnconfig $TSOUBSD_VND ${TSOUBSD_SETSDIR}/install??.fs
+    tudo_bem "configuring vnode $TSOUBSD_VND"
+    $DOAS_CMD mount /dev/${TSOUBSD_VND}a $TSOUBSD_MOUNTPOINT
+    tudo_bem "mounting /dev/${TSOUBSD_VND}c on $TSOUBSD_MOUNTPOINT"
+    tsouecho "Extracting image files..."
+    cp -rpf $TSOUBSD_MOUNTPOINT/?.?/`uname -m`/* $TSOUBSD_SETSDIR/
+    tsouecho "Unmounting $TSOUBSD_MOUNTPOINT..."
+    $DOAS_CMD umount $TSOUBSD_MOUNTPOINT
+    $DOAS_CMD vnconfig -u $TSOUBSD_VND
+    tudo_bem "running vnconfig -u $TSOUBSD_VND"
+    $DOAS_CMD cp -f ${TSOUBSD_SETSDIR}/bsd.rd ${TSOUBSD_RAMDISKDIR}/nbsd.rd
+    rm -f ${TSOUBSD_FSCHECKSUM}
+    tsouecho "Reboot and boot the nbsd.rd kernel, which is in: ${TSOUBSD_RAMDISKDIR}"
+    tsouecho "The file sets are under: ${TSOUBSD_SETSDIR}"
+}
+        
+
+########################################################################
+# tsoubsd cvs ...
+
+lock_sourcedir()
+{
+    do_confirm "I will lock the sourcedir."
+    $DOAS_CMD mount -u -o ro $OPENBSD_SOURCEDIR
+    tudo_bem "making $OPENBSD_SOURCEDIR read-only"
+}
+
+unlock_sourcedir()
+{
+    do_confirm "I will unlock the sourcedir."
+    $DOAS_CMD mount -u -o rw,softdep $OPENBSD_SOURCEDIR
+    tudo_bem "making $OPENBSD_SOURCEDIR read-write"
+}
+
+cvs_checkout()
+{
+    CHECKOUT_TARGET=$1
+    # make sure you got a correct argument
+    case $CHECKOUT_TARGET in
+        src)
+            CHECKOUT_MODULES=src
+            ;;
+        xenocara)
+            CHECKOUT_MODULES=xenocara
+            ;;
+        ports)
+            CHECKOUT_MODULES=ports
+            ;;
+        sxp|all|"")
+            CHECKOUT_MODULES="src xenocara ports"
+            CHECKOUT_WWW="www"
+            ;;
+        www)
+            CHECKOUT_WWW="www"
+            ;;
+        *)
+            tsoubsd_cvs_usage
+            exit 1
+            ;;
+    esac
+
+    unlock_sourcedir
+
+    tsouechon "I will checkout: $CHECKOUT_MODULES $CHECKOUT_WWW"
+    do_confirm
+
+    # checkout src, xenocara, and ports
+    if [ ! X"$CHECKOUT_TARGET" = X"www" ]; then
+        cd $OPENBSD_SOURCEDIR
+        tudo_bem "making $OPENBSD_SOURCEDIR read-write"
+        cvs -d${OPENBSD_CVSROOT} checkout -r${OPENBSD_CVS_BRANCH} -P $CHECKOUT_MODULES && cd -
+        tudo_bem "checking out src, xenocara, and ports"
+    fi
+
+    # checkout www
+    if [ X"$CHECKOUT_WWW" = X"www" ]; then
+        cd $OPENBSD_SOURCEDIR
+        cvs -d${OPENBSD_CVSROOT} checkout -rHEAD -P www && cd -
+        tudo_bem "checking out www"
+    fi
+
+    lock_sourcedir
+}
+
+cvs_update_src()
+{
+    tsouecho "Updating src..."
+    cd ${BSDSRCDIR}
+    cvs -q -d${OPENBSD_CVSROOT} up -r${OPENBSD_CVS_BRANCH} -Pd
+    cd -
+}
+
+cvs_update_xenocara()
+{
+    tsouecho "Updating xenocara..."
+    cd ${XSRCDIR}
+    cvs -q -d${OPENBSD_CVSROOT} up -r${OPENBSD_CVS_BRANCH} -Pd
+    cd -
+}
+
+cvs_update_ports()
+{
+    tsouecho "Updating ports..."
+    cd ${PORTSDIR}
+    cvs -q -d${OPENBSD_CVSROOT} up -r${OPENBSD_CVS_BRANCH} -Pd
+    cd -
+}
+
+cvs_update_www()
+{
+    tsouecho "Updating www..."
+    cd ${WWWDIR}
+    cvs -q -d${OPENBSD_CVSROOT} up -rHEAD -Pd
+    cd -
+}
+
+cvs_update()
+{
+    UPDATE_TARGET=$1
+    # make sure you got a correct argument
+    case $UPDATE_TARGET in
+        src|xenocara|ports|sxp|www|all|"")
+            ;;
+        *)
+            tsoubsd_cvs_usage
+            exit 1
+            ;;
+    esac
+
+    unlock_sourcedir
+
+    # update
+    case $UPDATE_TARGET in
+        src)
+            cvs_update_src
+            ;;
+        xenocara)
+            cvs_update_xenocara
+            ;;
+        ports)
+            cvs_update_ports
+            ;;
+        sxp)
+            cvs_update_src
+            cvs_update_xenocara
+            cvs_update_ports
+            ;;
+        www)
+            cvs_update_www
+            ;;
+        all|"")
+            cvs_update_src
+            cvs_update_xenocara
+            cvs_update_ports
+            cvs_update_www
+            ;;
+        *)
+            tsoubsd_cvs_usage()
+            exit 1
+            ;;
+    esac
+
+    lock_sourcedir
+}
+
+cvs_sync()
+{
+    do_confirm "I will simply run cvsync."
+    cvsync
+}
+
+
+########################################################################
+# tsoubsd upgrade ...
+
+getnewsnapshot()
+{
+    only_for_branch "CURRENT"
+    show_relconf
+    do_confirm "...Right?"
+    
+    if [ X"$TSOUBSD_SETSDIR" = X"" ]; then
+      tsouerror "You must set TSOUBSD_SETSDIR."
+      exit 1;
+    fi
+    if [ ! -d $TSOUBSD_SETSDIR ]; then
+      tsouerror "No such directory: $TSOUBSD_SETSDIR (TSOUBSD_SETSDIR)."
+      exit 1;
+    fi
+    
+    cd $TSOUBSD_SETSDIR || exit 1;
+    
+    VERSION_CANDIDATE=`uname -r | tr -d .`
+    INSTALLED_CANDIDATE=install${VERSION_CANDIDATE}.fs
+    
+    tsouecho "Fetching checksum from original site..."
+    ftp -V -o - $OPENBSD_ORIGINAL_ARCH/SHA256 | grep 'install.*\.fs' > $TSOUBSD_FSCHECKSUM
+    
+    if [ -f $INSTALLED_CANDIDATE ]; then
+        tsouecho "Checking against downloaded fs file..."
+        sha256 -q -c $TSOUBSD_FSCHECKSUM
+        if [ $? -eq 0 ]; then
+            tsouecho "No newer snapshot."
+            tsouecho "Removing $TSOUBSD_FSCHECKSUM..."
+            rm -f $TSOUBSD_FSCHECKSUM
+            do_confirm "I will proceed with the (re)installation of the existing snapshot."
+            mount_and_install_bsdrd
+            tsouecho "Don't forget to check http://www.openbsd.org/faq/current.html"
+            exit 0
+        else
+            tsouecho "Existing fs is probably outdated."
+            do_confirm "I will empty all contents of $TSOUBSD_SETSDIR and proceed with downloading."
+            rm -rf $TSOUBSD_SETSDIR/*
+        fi
+    fi
+    
+    tsouecho "Fetching fs file..."
+    INSTALLFSFILE=`grep -o 'install..\.fs' $TSOUBSD_FSCHECKSUM`
+    ftp -V $OPENBSD_MIRROR_ARCH/$INSTALLFSFILE
+    cat $TSOUBSD_FSCHECKSUM
+    sha256 -q -c $TSOUBSD_FSCHECKSUM
+    if [ $? -eq 0 ]; then
+        mount_and_install_bsdrd
+        tsouecho "Don't forget to check http://www.openbsd.org/faq/current.html"
+    else
+        tsouecho "Bad luck: mirror's fs file does not match the one in original site."
+        do_confirm "I will remove the existing fs, refetch it, mount it and install it from the original site."
+        rm -f $TSOUBSD_SETSDIR/install??.fs
+        ftp -V $OPENBSD_ORIGINAL_ARCH/$INSTALLFSFILE
+        sha256 -q -c $TSOUBSD_FSCHECKSUM
+        if [ $? -eq 0 ]; then
+            mount_and_install_bsdrd
+        else
+            tsouerror "Even from the original site, the sha256 checksum was wrong!  Aborting."
+            exit 1
+        fi
+    fi
+    tsouecho "Fetching SHA256.sig..."
+    ftp -V $OPENBSD_MIRROR_ARCH/SHA256.sig
+}
+
+getnewrelease()
+{
+    only_for_branch "STABLE"
+    show_relconf
+    do_confirm "...Right?"
+    
+    if [ X"$TSOUBSD_SETSDIR" = X"" ]; then
+      tsouecho "You must set TSOUBSD_SETSDIR."
+      exit 1
+    fi
+    
+    NEWRELEASEINT=$((`uname -r | tr -d .` + 1))
+    NEWRELEASE=`echo $NEWRELEASEINT | sed "s/\(.\)$/.\1/"`
+    NEWFSFILE=install${NEWRELEASEINT}.fs
+
+    cd $TSOUBSD_SETSDIR
+    
+    tsouecho "Fetching checksum from original site..."
+    ftp -V -o - $OPENBSD_ORIGINAL/$NEWRELEASE/`uname -m`/SHA256 | grep 'install.*fs' > $TSOUBSD_FSCHECKSUM
+
+    if [ $? -ne 0 ]; then
+        echo
+        tsouecho "Sorry, I cannot seem to find a new release."
+        exit 1
+    fi
+    
+    if [ ! -f $TSOUBSD_SETSDIR/$NEWFSFILE ]; then
+        tsouecho "Fetching fs file..."
+        ftp -V $OPENBSD_MIRROR/$NEWRELEASE/`uname -m`/${NEWFSFILE}
+    else
+        do_confirm "Found existing ${NEWFSFILE}.  I will try to use it."
+    fi
+
+    if [ $? -eq 0 ]; then
+        mount_and_install_bsdrd
+    else
+        tsouecho "Bad luck: fs file does not match the one in original site."
+        do_confirm "I will remove all files under $TSOUBSD_SETSDIR, refetch the fs, mount it and install it from the original site instead."
+        rm -i $TSOUBSD_SETSDIR/${NEWFSFILE}
+        ftp -V $OPENBSD_ORIGINAL/$NEWRELEASE/`uname -m`/${NEWFSFILE}
+        sha256 -q -c $TSOUBSD_FSCHECKSUM
+        if [ $? -eq 0 ]; then
+            mount_and_install_bsdrd
+        else
+            tsouecho "Even from the original site, the sha256 checksum was wrong!"
+            tsouecho "Investigate or try again later."
+            exit 1
+        fi
+    fi
+
+    tsouecho "Don't forget to check http://www.openbsd.org/upgrade${NEWRELEASEINT}.html before you proceed!"
+
+}
+
+
+########################################################################
+# tsoubsd ssl
+
+tsoubsd_ssl()
+{
+    require_root
+    KEYNAME=$1
+
+    # we need the key name as an argument
+    if [ X"$1" = X"" ]; then
+        tsoubsd_ssl_usage
+        exit 1
+    fi
+
+    # do not proceed if you are about to erase an existing key
+    if [ -f /etc/ssl/private/${KEYNAME}.key -o -f /etc/ssl/private/${KEYNAME}.csr -o -f /etc/ssl/certs/${KEYNAME}.crt ]; then
+        tsouerror "There is already a ${KEYNAME}.* file.  Aborting..."
+        exit 1
+    fi
+
+    do_confirm "The key will be named: ${KEYNAME}."
+
+    # create key
+    openssl genrsa \
+        -out /etc/ssl/private/${KEYNAME}.key 4096
+
+    # create Certificate Signing Request
+    openssl req -new \
+        -key /etc/ssl/private/${KEYNAME}.key \
+        -out /etc/ssl/private/${KEYNAME}.csr
+        
+    # self-sign the CSR
+    do_confirm "I can self-sign /etc/ssl/private/${KEYNAME}.csr if you want."
+    openssl x509 -sha256 -req \
+        -days 365 \
+        -in /etc/ssl/private/${KEYNAME}.csr \
+        -signkey /etc/ssl/private/${KEYNAME}.key \
+        -out /etc/ssl/${KEYNAME}.crt
+}
+
+
+########################################################################
+# tsoubsd portsupdate
+
+tsoubsd_portsupdate()
+{
+    if [ X"$EDITOR" = X"" ]; then
+        tsouerror "error: EDITOR is unset or empty."
+        exit 1
+    elif [ ! -x `command -v $EDITOR` ]; then
+        tsouerror "error: cannot execute $EDITOR."
+    fi
+
+    unlock_sourcedir
+
+    # get list
+    OODLISTFILE=`mktemp -t tsoubsd.portsupdate.XXXXXX`
+    tsouecho "Checking out-of-date packages with, duh, out-of-date(1).  This might take a while..."
+    $PORTSDIR/infrastructure/bin/out-of-date -x > $OODLISTFILE
+    tudo_bem "running out-of-date(1)."
+
+    # show list
+    cat $OODLISTFILE
+
+    # edit list
+    $EDITOR $OODLISTFILE
+    tudo_bem "editing list"
+
+    # update ports in list
+    do_confirm "I will feed this file to dpb(1)."
+    $PORTSDIR/infrastructure/bin/dpb -P$OODLISTFILE
+    tudo_bem "running dpb(1)"
+
+    # get rid of list
+    do_confirm "I will remove the list now ($OODLISTFILE)."
+    rm -f $OODLISTFILE
+
+    lock_sourcedir
+}
+
+
+
+########################################################################
+# main
+
+init_tsoubsd
+
+read_mkconf
+
+case $1 in
+
+    build)
+        if [ X"$2" = X"" ]; then
+            tsouecho "Usage: tsoubsd $1 {kernels|userland|xenocara|ux}"
+            exit 1
+        fi
+        show_machine
+        show_src
+        show_obj
+        do_confirm
+        case $2 in
+            kernels)
+                build_kernels
+                autoinstall_kernel
+                ;;
+            userland)
+                init_objectdir
+                build_userland
+                ;;
+            xenocara)
+                init_objectdir
+                build_xenocara
+                ;;
+            ux)
+                init_objectdir
+                build_userland
+                if [ X"$BSDOBJDIR" = X"$XOBJDIR" ]; then
+                    init_objectdir_force
+                fi
+                build_xenocara
+                ;;
+            *)
+                tsoubsd_build_usage
+                exit 1
+                ;;
+        esac
+        ;;
+
+    cvs)
+        shift
+        if [ X"$1" = X"" ]; then
+            tsoubsd_cvs_usage
+            exit 1
+        fi
+        umask $TSOUBSD_SRC_UMASK
+        show_machine
+        show_cvs
+        show_src
+        echo
+        # check needed variables
+        if [ X"$OPENBSD_SOURCEDIR" = X"" ]; then
+            tsouecho "Problem: OPENBSD_SOURCEDIR is blank."
+            exit 1
+        fi
+        if [ X"$OPENBSD_CVSROOT" = X"" ]; then
+            tsouecho "Problem: OPENBSD_CVSROOT is blank"
+            exit 1
+        fi
+        case $1 in
+            checkout|co)
+                shift
+                cvs_checkout $1
+                ;;
+            update|up)
+                shift
+                cvs_update $1
+                ;;
+            sync)
+                shift
+                cvs_sync
+                ;;
+            *)
+                tsoubsd_cvs_usage
+                exit 1
+                ;;
+        esac
+        ;;
+
+    upgrade)
+        case $OPENBSD_BRANCH in
+            STABLE)
+                getnewrelease
+                ;;
+            CURRENT)
+                getnewsnapshot
+                ;;
+        esac
+        ;;
+
+    portsupdate)
+        tsouecho "It seems that out-of-date/dpb is not such a good idea."
+        tsouabortprompt
+        if [ X"${OPENBSD_BRANCH}" = X"CURRENT" ]; then
+            do_confirm "You are running CURRENT.  Make sure you have checked the binary packages first."
+        fi
+        tsoubsd_portsupdate
+        ;;
+
+    news)
+        show_machine
+        echo
+        tsouecho "Installed kernel date:"
+        sysctl -n kern.version | head -1 | cut -f "2-" -d ":"
+        OSRELEASEINT=`uname -r | tr -d .`
+        echo
+        case $OPENBSD_BRANCH in
+            STABLE)
+                tsouecho "Stable latest errata:"
+                lynx -dump "http://www.openbsd.org/errata`uname -r | tr -d .`.html" | grep "*" | tail -3 | cut -f 2 -d "*"
+                ;;
+            CURRENT)
+                tsouecho "Installed /bsd file date:"
+                echo -n " "
+                ls -lT /bsd | awk '{print $6,$7,$8,$9}'
+                echo
+                tsouecho "Following -current latest information:"
+                curl -s "http://www.openbsd.org/faq/current.html" | grep "<h3>" | grep -iv "table of contents" | lynx -dump -stdin | grep "." | tail -3
+                echo
+                tsouecho "Latest snapshot in selected mirror:"
+                curl -s -I ${OPENBSD_MIRROR}/snapshots/`uname -m`/bsd.rd | grep Last-Modified | cut -c "15-"
+                tsouecho "Latest snapshot in original server:"
+                curl -s -I http://ftp.openbsd.org/pub/OpenBSD/snapshots/`uname -m`/bsd.rd | grep Last-Modified | cut -c "15-"
+                ;;
+        esac
+        ;;
+
+    ssl)
+        shift
+        show_machine
+        tsoubsd_ssl $1
+        ;;
+
+    help)
+        show_version
+        tsoubsd_usage
+        ;;
+
+    version)
+        show_version
+        ;;
+
+    *)
+        tsoubsd_usage
+        exit 1
+        ;;
+
+esac
+

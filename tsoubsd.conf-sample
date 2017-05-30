@@ -1,0 +1,29 @@
+# tsoubsd configuration
+# place under /etc/tsoubsd.conf
+
+# Source'ing and cvs'ing
+OPENBSD_ANONCVSROOT=anoncvs@anoncvs.fr.openbsd.org:/cvs
+OPENBSD_CVSROOT=/cvsroot/OpenBSD
+OPENBSD_SOURCEDIR=/usr/source
+OPENBSD_OBJECTDIR=/usr/object
+
+# OpenBSD hosts
+OPENBSD_ORIGINAL="http://ftp.openbsd.org/pub/OpenBSD/"
+OPENBSD_MIRROR="http://ftp.fr.openbsd.org/pub/OpenBSD/"
+
+OPENBSD_BRANCH="CURRENT"
+
+# installation sets and kernels
+TSOUBSD_SETSDIR=/var/sets
+TSOUBSD_RAMDISKDIR=/
+TSOUBSD_MOUNTPOINT=/mnt
+TSOUBSD_SRC_UMASK=002
+TSOUBSD_AUTOINSTALL_KERNEL="GENERIC.MP"
+
+# iso downloading
+TSOUBSD_FSCHECKSUM=/tmp/tsoubsd-install-SHA256
+TSOUBSD_VND=vnd0
+
+# misc
+SM_PATH=${TSOUBSD_SETSDIR}
+
