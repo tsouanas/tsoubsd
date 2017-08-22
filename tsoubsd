@@ -3,7 +3,7 @@
 # author: Thanos Tsouanas <thanos@tsouanas.org>
 
 # tsoubsd superscript
-VERSION=1.7
+VERSION=1.8
 
 # error codes 
 ERRPERMISSION=4
@@ -604,9 +604,10 @@ getnewsnapshot()
         fi
     fi
     
-    tsouecho "Fetching fs file..."
+    tsouecho "Fetching fs and SHA256.sig file..."
     INSTALLFSFILE=`grep -o 'install..\.fs' $TSOUBSD_FSCHECKSUM`
     ftp -V $OPENBSD_MIRROR_ARCH/$INSTALLFSFILE
+    ftp -V $OPENBSD_MIRROR_ARCH/SHA256.sig
     cat $TSOUBSD_FSCHECKSUM
     sha256 -q -c $TSOUBSD_FSCHECKSUM
     if [ $? -eq 0 ]; then
@@ -614,9 +615,11 @@ getnewsnapshot()
         tsouecho "Don't forget to check http://www.openbsd.org/faq/current.html"
     else
         tsouecho "Bad luck: mirror's fs file does not match the one in original site."
-        do_confirm "I will remove the existing fs, refetch it, mount it and install it from the original site."
+        do_confirm "I will remove the existing .fs and SHA256.sig, refetch them, mount and install, now from the original site."
         rm -f $TSOUBSD_SETSDIR/install??.fs
+        rm -f $TSOUBSD_SETSDIR/SHA256.sig
         ftp -V $OPENBSD_ORIGINAL_ARCH/$INSTALLFSFILE
+        ftp -V $OPENBSD_ORIGINAL_ARCH/SHA256.sig
         sha256 -q -c $TSOUBSD_FSCHECKSUM
         if [ $? -eq 0 ]; then
             mount_and_install_bsdrd
@@ -625,8 +628,6 @@ getnewsnapshot()
             exit 1
         fi
     fi
-    tsouecho "Fetching SHA256.sig..."
-    ftp -V $OPENBSD_MIRROR_ARCH/SHA256.sig
 }
 
 getnewrelease()
