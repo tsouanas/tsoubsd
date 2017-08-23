@@ -3,7 +3,7 @@
 # author: Thanos Tsouanas <thanos@tsouanas.org>
 
 # tsoubsd superscript
-VERSION=1.8
+VERSION=1.9
 
 # error codes 
 ERRPERMISSION=4
@@ -436,7 +436,10 @@ cvs_checkout()
         ports)
             CHECKOUT_MODULES=ports
             ;;
-        sxp|all|"")
+        sxp|"")
+            CHECKOUT_MODULES="src xenocara ports"
+            ;;
+        all)
             CHECKOUT_MODULES="src xenocara ports"
             CHECKOUT_WWW="www"
             ;;
@@ -457,7 +460,6 @@ cvs_checkout()
     # checkout src, xenocara, and ports
     if [ ! X"$CHECKOUT_TARGET" = X"www" ]; then
         cd $OPENBSD_SOURCEDIR
-        tudo_bem "making $OPENBSD_SOURCEDIR read-write"
         cvs -d${OPENBSD_CVSROOT} checkout -r${OPENBSD_CVS_BRANCH} -P $CHECKOUT_MODULES && cd -
         tudo_bem "checking out src, xenocara, and ports"
     fi
@@ -530,7 +532,7 @@ cvs_update()
         ports)
             cvs_update_ports
             ;;
-        sxp)
+        sxp|"")
             cvs_update_src
             cvs_update_xenocara
             cvs_update_ports
@@ -538,7 +540,7 @@ cvs_update()
         www)
             cvs_update_www
             ;;
-        all|"")
+        all)
             cvs_update_src
             cvs_update_xenocara
             cvs_update_ports
