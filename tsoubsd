@@ -57,9 +57,9 @@ tsouabortprompt()
 
 do_confirm()
 {
-	echo $1
-	tsouecho "Press enter to proceed, Ctrl-C to cancel."
-	read nothing
+    echo $1
+    tsouecho "Press enter to proceed, Ctrl-C to cancel."
+    read nothing
 }
 
 psiu()
